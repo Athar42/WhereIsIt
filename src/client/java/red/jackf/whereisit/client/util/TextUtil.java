@@ -53,7 +53,7 @@ public class TextUtil {
 
     private static void prettyPrintCompound(Consumer<Component> consumer, @Nullable MutableComponent firstPrefix, int indentLevel, CompoundTag tag) {
         final boolean[] doneFirst = {false};
-        tag.getAllKeys().stream().sorted((s1, s2) -> s1.equals(SearchRequest.ID) ? -1 : s2.equals(SearchRequest.ID) ? 1 : 0).forEach(key ->  {
+        tag.keySet().stream().sorted((s1, s2) -> s1.equals(SearchRequest.ID) ? -1 : s2.equals(SearchRequest.ID) ? 1 : 0).forEach(key ->  {
             Tag value = tag.get(key);
             var prefix = byIndent("  ".repeat(indentLevel) + key, indentLevel).append(white(": "));
             if (!doneFirst[0] && firstPrefix != null) {
