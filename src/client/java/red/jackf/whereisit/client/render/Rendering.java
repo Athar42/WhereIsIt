@@ -1,5 +1,9 @@
 package red.jackf.whereisit.client.render;
 
+import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.shaders.ShaderType;
+import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
 import com.mojang.math.Axis;
@@ -19,11 +23,13 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
+import org.joml.Vector3f;
 import org.lwjgl.opengl.GL11;
 import red.jackf.whereisit.api.SearchRequest;
 import red.jackf.whereisit.api.SearchResult;
 import red.jackf.whereisit.config.WhereIsItConfig;
 
+import java.nio.ByteBuffer;
 import java.util.*;
 
 @SuppressWarnings("resource") // i really don't want to call ClientLevel#close() thanks
@@ -185,8 +191,8 @@ public class Rendering {
         bgBuffer.addVertex(matrix4f, x + width, 10f, 0).setColor(bgColour).setLight(LightTexture.FULL_BRIGHT);
         bgBuffer.addVertex(matrix4f, x + width, -1f, 0).setColor(bgColour).setLight(LightTexture.FULL_BRIGHT);
 
-        RenderSystem.disableDepthTest();
-        RenderSystem.depthFunc(GL11.GL_ALWAYS);
+        //RenderSystem.disableDepthTest();
+        //RenderSystem.depthFunc(GL11.GL_ALWAYS);
 
         if (label.seeThrough) {
             Minecraft.getInstance().font.drawInBatch(label.text, x, 0, 0xFF_FFFFFF, false,
@@ -201,8 +207,8 @@ public class Rendering {
             Minecraft.getInstance().font.drawInBatch(label.text, x, 0, 0xFF_FFFFFF, false,
                     matrix4f, consumers, Font.DisplayMode.NORMAL, 0, LightTexture.FULL_BRIGHT);
         }
-        RenderSystem.depthFunc(GL11.GL_LEQUAL);
-        RenderSystem.enableDepthTest();
+        //RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        //RenderSystem.enableDepthTest();
 
 
         pose.popPose();
@@ -213,7 +219,7 @@ public class Rendering {
     /////////////////////
 
     // render all boxes at END
-    private static void renderBoxes(WorldRenderContext context, float progress) {
+    /*private static void renderBoxes(WorldRenderContext context, float progress) {
         var camera = context.camera();
 
         var pose = new PoseStack();
@@ -227,13 +233,6 @@ public class Rendering {
 
         var tesselator = Tesselator.getInstance();
         var builder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
-
-        /*builder.defaultColor(
-                FastColor.ARGB32.red(colour),
-                FastColor.ARGB32.green(colour),
-                FastColor.ARGB32.blue(colour),
-                (int) (alpha * 255)
-        );*/
 
         final int r = ARGB.red(colour);
         final int g = ARGB.green(colour);
@@ -274,17 +273,75 @@ public class Rendering {
         RenderSystem.depthFunc(GL11.GL_ALWAYS);
 
         BufferUploader.drawWithShader(builder.buildOrThrow());
-        //tesselator.end();
 
-        //builder.unsetDefaultColor();
 
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         RenderSystem.disableBlend();
 
+    }*/
+
+    private static void renderBoxes(WorldRenderContext context, float progress) {
+        var camera = context.camera();
+
+        var pose = new PoseStack();
+        pose.mulPose(Axis.XP.rotationDegrees(camera.getXRot()));
+        pose.mulPose(Axis.YP.rotationDegrees(camera.getYRot() - 180f));
+
+        // Calculate alpha and color based on progress
+        var alpha = 1 - (progress / 2f);
+        var colour = CurrentGradientHolder.getColour(getBaseProgress(getTicksSinceSearch(), context.tickCounter().getGameTimeDeltaPartialTick(true)));
+        var scale = easingFunc(progress);
+
+        var bufferSource = Minecraft.getInstance().renderBuffers().bufferSource();
+        // Prepare the builder to start collecting vertex data
+        var builder = bufferSource.getBuffer(RenderType.guiOverlay());
+
+
+        final int r = ARGB.red(colour);
+        final int g = ARGB.green(colour);
+        final int b = ARGB.blue(colour);
+        final int a = (int) (alpha * 255);
+
+        // Loop through each result and render the boxes
+        for (SearchResult result : results.values()) {
+            renderBox(
+                    camera.getPosition(),
+                    result.pos(),
+                    builder,
+                    pose,
+                    scale,
+                    r,
+                    g,
+                    b,
+                    a
+            );
+
+            for (BlockPos otherPos : result.otherPositions()) {
+                renderBox(
+                        camera.getPosition(),
+                        otherPos,
+                        builder,
+                        pose,
+                        scale,
+                        r,
+                        g,
+                        b,
+                        a
+                );
+            }
+        }
+
+        // Set the color for the shader
+        RenderSystem.setShaderColor(1f, 1f, 1f, alpha); // Apply the alpha for the color
+
+        bufferSource.endBatch();
+
+        // Reset shader color and rendering options back to default
+        RenderSystem.setShaderColor(1f, 1f, 1f, 1f); // Reset color to white
     }
 
-    // render an individual box
+
     private static void renderBox(Vec3 cameraPos,
                                   BlockPos pos,
                                   VertexConsumer consumer,
@@ -292,52 +349,183 @@ public class Rendering {
                                   float scale,
                                   int r, int g, int b, int a) {
         pose.pushPose();
-        // done here to fix floating point issues (e.g. at world border)
+
+        RenderSystem.setShaderTexture(GL11.GL_LEQUAL, RenderSystem.getShaderTexture(GL11.GL_LEQUAL));
+        // Apply translation to fix floating-point issues and move the box to the correct position
         final double xOffset = pos.getX() + (0.5 - cameraPos.x);
         final double yOffset = pos.getY() + (0.5 - cameraPos.y);
         final double zOffset = pos.getZ() + (0.5 - cameraPos.z);
         pose.translate(xOffset, yOffset, zOffset);
+
+        // Apply scale to the box
         pose.scale(scale * 0.5f, scale * 0.5f, scale * 0.5f);
+
+        // Get the final matrix after applying transformations (translation and scaling)
         var resultMatrix = pose.last().pose();
 
-        // -Z
-        consumer.addVertex(resultMatrix, -1, -1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, 1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, 1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, -1, -1).setColor(r, g, b, a);
+        // Define normals for each face
+        Vector3f normalNegZ = new Vector3f(0, 0, -1);
+        Vector3f normalPosZ = new Vector3f(0, 0, 1);
+        Vector3f normalNegY = new Vector3f(0, -1, 0);
+        Vector3f normalPosY = new Vector3f(0, 1, 0);
+        Vector3f normalNegX = new Vector3f(-1, 0, 0);
+        Vector3f normalPosX = new Vector3f(1, 0, 0);
 
-        // +Z
-        consumer.addVertex(resultMatrix, -1, -1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, -1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, 1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, 1, 1).setColor(r, g, b, a);
+        // -Z face (apply matrix here)
+        consumer.addVertex(resultMatrix, -1, -1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegZ.x(), normalNegZ.y(), normalNegZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
 
-        // -Y
-        consumer.addVertex(resultMatrix, -1, -1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, -1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, -1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, -1, 1).setColor(r, g, b, a);
+        consumer.addVertex(resultMatrix, -1, 1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegZ.x(), normalNegZ.y(), normalNegZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
 
-        // +Y
-        consumer.addVertex(resultMatrix, -1, 1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, 1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, 1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, 1, -1).setColor(r, g, b, a);
+        consumer.addVertex(resultMatrix, 1, 1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegZ.x(), normalNegZ.y(), normalNegZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
 
-        // -X
-        consumer.addVertex(resultMatrix, -1, -1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, -1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, 1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, -1, 1, -1).setColor(r, g, b, a);
+        consumer.addVertex(resultMatrix, 1, -1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegZ.x(), normalNegZ.y(), normalNegZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
 
-        // +X
-        consumer.addVertex(resultMatrix, 1, -1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, 1, -1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, 1, 1).setColor(r, g, b, a);
-        consumer.addVertex(resultMatrix, 1, -1, 1).setColor(r, g, b, a);
+        // +Z face (apply matrix here)
+        consumer.addVertex(resultMatrix, -1, -1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosZ.x(), normalPosZ.y(), normalPosZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, -1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosZ.x(), normalPosZ.y(), normalPosZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, 1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosZ.x(), normalPosZ.y(), normalPosZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, -1, 1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosZ.x(), normalPosZ.y(), normalPosZ.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        // -Y face (apply matrix here)
+        consumer.addVertex(resultMatrix, -1, -1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegY.x(), normalNegY.y(), normalNegY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, -1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegY.x(), normalNegY.y(), normalNegY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, -1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegY.x(), normalNegY.y(), normalNegY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, -1, -1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegY.x(), normalNegY.y(), normalNegY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        // +Y face (apply matrix here)
+        consumer.addVertex(resultMatrix, -1, 1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosY.x(), normalPosY.y(), normalPosY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, -1, 1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosY.x(), normalPosY.y(), normalPosY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, 1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosY.x(), normalPosY.y(), normalPosY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, 1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosY.x(), normalPosY.y(), normalPosY.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        // -X face (apply matrix here)
+        consumer.addVertex(resultMatrix, -1, -1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegX.x(), normalNegX.y(), normalNegX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, -1, -1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegX.x(), normalNegX.y(), normalNegX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, -1, 1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegX.x(), normalNegX.y(), normalNegX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, -1, 1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalNegX.x(), normalNegX.y(), normalNegX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        // +X face (apply matrix here)
+        consumer.addVertex(resultMatrix, 1, -1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosX.x(), normalPosX.y(), normalPosX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, 1, -1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosX.x(), normalPosX.y(), normalPosX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, 1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosX.x(), normalPosX.y(), normalPosX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
+
+        consumer.addVertex(resultMatrix, 1, -1, 1);
+        consumer.setColor(r, g, b, a);
+        consumer.setNormal(normalPosX.x(), normalPosX.y(), normalPosX.z());
+        consumer.setUv(1f, 1f);
+        consumer.setUv2(1, 1);
 
         pose.popPose();
     }
+
+
+
 
     public static long getTicksSinceSearch() {
         return ticksSinceSearch;
